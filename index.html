@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; connect-src 'self' blob: data:; img-src 'self' blob: data:; media-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <title>Ryan's Reel Kit</title>
+  <meta name="description" content="Edit 9:16 videos and layered photos on your phone. Everything stays on this device.">
+  <meta name="theme-color" content="#111318">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <link rel="stylesheet" href="vendor/fonts/fonts.css">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <!-- HOME -->
+  <section id="home" class="screen active" aria-label="Home">
+    <header class="bar">
+      <h1>Ryan's Reel Kit</h1>
+      <button class="icon" id="openSettings" aria-label="Settings and credits">⚙︎</button>
+    </header>
+    <div class="home-actions">
+      <button id="newVideo" class="big">🎬 New video</button>
+      <button id="newPhoto" class="big alt">🖼️ New photo</button>
+    </div>
+    <p class="hint">Your data lives in this app on this phone. Tap <b>Export</b> in Settings now and then.</p>
+    <h2>Drafts</h2>
+    <ul id="draftList" class="draft-list"></ul>
+  </section>
+
+  <!-- VIDEO EDITOR -->
+  <section id="video" class="screen" aria-label="Video editor">
+    <header class="bar">
+      <button class="icon" id="vBack" aria-label="Back to home">‹</button>
+      <input id="vName" class="title-input" aria-label="Project name">
+      <button class="icon" id="vUndo" aria-label="Undo">↶</button>
+      <button id="vExport" class="accent small">Export</button>
+    </header>
+    <div class="preview-wrap" id="previewWrap">
+      <canvas id="preview" width="540" height="960" aria-label="Video preview"></canvas>
+      <div id="dropHint" class="drop-hint">Tap <b>＋ Media</b> to add videos or photos</div>
+    </div>
+    <div class="transport">
+      <button class="icon" id="vPlay" aria-label="Play">▶</button>
+      <span id="vTime" class="time">0:00.0 / 0:00.0</span>
+      <label class="toggle"><input type="checkbox" id="safeZone"> Safe zone</label>
+      <button class="icon" id="vSplit" aria-label="Split at playhead">✂</button>
+      <button class="icon" id="vZoomOut" aria-label="Zoom timeline out">−</button>
+      <button class="icon" id="vZoomIn" aria-label="Zoom timeline in">+</button>
+    </div>
+    <div class="timeline-wrap">
+      <div class="timeline" id="timeline" aria-label="Timeline"><div class="tl-inner" id="tlInner"></div></div>
+      <div class="playhead" aria-hidden="true"></div>
+    </div>
+    <div id="inspector" class="inspector" hidden></div>
+    <nav class="toolbar" aria-label="Video tools">
+      <button data-tool="media">＋<span>Media</span></button>
+      <button data-tool="text">Aa<span>Text</span></button>
+      <button data-tool="sticker">😀<span>Sticker</span></button>
+      <button data-tool="overlay">🖼️<span>Overlay</span></button>
+      <button data-tool="cutout">✂️<span>Cutout</span></button>
+      <button data-tool="audio">♫<span>Audio</span></button>
+      <button data-tool="captions">CC<span>Captions</span></button>
+    </nav>
+  </section>
+
+  <!-- PHOTO EDITOR -->
+  <section id="photo" class="screen" aria-label="Photo editor">
+    <header class="bar">
+      <button class="icon" id="pBack" aria-label="Back">‹</button>
+      <input id="pName" class="title-input" aria-label="Photo name">
+      <button class="icon" id="pUndo" aria-label="Undo">↶</button>
+      <button id="pSend" class="accent small">To video</button>
+    </header>
+    <div class="stage-wrap" id="stageWrap"><div id="stage"></div></div>
+    <div class="ptools" role="toolbar" aria-label="Photo tools">
+      <button data-ptool="move" class="on">✥<span>Move</span></button>
+      <button data-ptool="select">⬚<span>Select</span></button>
+      <button data-ptool="mask">◐<span>Mask</span></button>
+      <button data-ptool="clone">⧉<span>Clone</span></button>
+      <button data-ptool="heal">✚<span>Heal</span></button>
+    </div>
+    <div id="ptoolOpts" class="ptool-opts"></div>
+    <div class="layers-panel">
+      <div class="row">
+        <h3>Layers</h3>
+        <button class="small" id="pAddImage">＋ Photo</button>
+        <button class="small" id="pAddText">＋ Text</button>
+        <button class="small ghost" id="pSavePng">Save PNG</button>
+      </div>
+      <ul id="layerList" class="layer-list"></ul>
+      <div id="layerProps" class="layer-props"></div>
+    </div>
+  </section>
+
+  <!-- SHEETS / DIALOGS -->
+  <dialog id="sheet" class="sheet"><div id="sheetBody"></div></dialog>
+
+  <dialog id="settings" class="sheet">
+    <h2>Settings</h2>
+    <p>Your data lives in this app on this phone. Tap <b>Export</b> now and then.</p>
+    <p id="storageInfo" class="hint"></p>
+    <p class="row"><button id="exportAll">Export backup (.zip)</button>
+      <label class="button ghost">Import backup<input type="file" id="importFile" accept=".zip,application/zip" hidden></label></p>
+    <p class="row"><button id="offlinePacks" class="ghost">Download caption + cutout packs for offline</button></p>
+    <p id="offlineInfo" class="hint"></p>
+    <h3>Caption accuracy</h3>
+    <p class="row"><label><input type="radio" name="asrModel" value="whisper-tiny.en_timestamped" checked> Fast (41 MB)</label>
+      <label><input type="radio" name="asrModel" value="whisper-base.en_timestamped"> Better (77 MB)</label></p>
+    <h3>Credits</h3>
+    <div id="credits"></div>
+    <p><small>Not affiliated with any app or company. Personal use.</small></p>
+    <p><button class="ghost" id="closeSettings">Close</button></p>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <input type="file" id="filePick" hidden>
+  <script src="vendor/konva.min.js"></script>
+  <script src="js/main.js" type="module"></script>
+</body>
+</html>
