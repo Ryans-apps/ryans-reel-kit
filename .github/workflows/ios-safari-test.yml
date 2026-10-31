@@ -1,0 +1,50 @@
+name: iOS Safari test
+# Test-only. Runs Reel Kit (from main) in real Mobile Safari on an iPhone Simulator and saves screenshots.
+# Lives on branch ci/ios-safari-test only; GitHub Pages serves main, so the live site is untouched.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ci/ios-safari-test]
+permissions:
+  contents: read
+jobs:
+  ios-safari:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with: { ref: main, path: appsrc }
+      - name: Pick and boot an iPhone simulator
+        run: |
+          xcodebuild -version; xcrun simctl list runtimes
+          UDID=$(xcrun simctl list devices available -j | python3 -c "
+          import json,sys,re
+          d=json.load(sys.stdin)['devices']
+          rts=sorted([k for k in d if 'iOS' in k], key=lambda k:[int(x) for x in re.findall(r'\d+',k)])
+          for rt in reversed(rts):
+              ph=[x for x in d[rt] if x['name'].startswith('iPhone') and 'Pro' in x['name'] and 'Max' not in x['name']] or [x for x in d[rt] if x['name'].startswith('iPhone')]
+              if ph: print(ph[0]['udid']); sys.stderr.write(rt+' '+ph[0]['name']+'\n'); break
+          ")
+          echo "UDID=$UDID" >> $GITHUB_ENV
+          xcrun simctl boot "$UDID"; xcrun simctl bootstatus "$UDID" -b
+          mkdir -p out; xcrun simctl list devices booted > out/device.txt
+      - name: Live site in Mobile Safari
+        run: |
+          xcrun simctl openurl booted "https://ryans-apps.github.io/ryans-reel-kit/"
+          sleep 30; xcrun simctl io booted screenshot out/live-01-first-load.png
+          sleep 20; xcrun simctl io booted screenshot out/live-02-after-sw.png
+      - name: Full feature run against main (local copy) in Mobile Safari
+        run: |
+          python3 ci/ios-safari/server.py appsrc out > out/server.log 2>&1 &
+          sleep 2
+          xcrun simctl openurl booted "http://localhost:8123/ci/harness.html"
+          for i in $(seq 1 150); do [ -f out/done ] && break; sleep 4; if [ $((i % 15)) -eq 0 ]; then xcrun simctl io booted screenshot out/progress-$i.png; fi; done
+          xcrun simctl io booted screenshot out/zz-final.png
+          cat out/results.jsonl || true
+      - name: Collect Safari logs
+        if: always()
+        run: xcrun simctl spawn booted log show --last 10m --style compact --predicate 'process == "MobileSafari" OR process CONTAINS "WebContent"' > out/safari-log.txt 2>&1 || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: ios-safari-results, path: out/ }
