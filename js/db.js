@@ -27,12 +27,20 @@ export const uid = (p = '') => p + Math.random().toString(36).slice(2, 9) + Date
 
 // Media: blobs stored once, referenced by id everywhere.
 const urlCache = new Map();
+// Some browsers (private browsing, WebKit ephemeral sessions) refuse to store Blobs in IndexedDB and abort with a null error.
+// Then store the bytes as an ArrayBuffer instead; if that fails too, throw a readable message.
+export const SAVE_FAIL = 'This file could not be saved on this device. Private browsing or full storage can block it; try a normal window or free some space.';
+async function putMedia(rec, blob) {
+  try { await put('media', { ...rec, blob, buf: undefined }); return; } catch (e) { console.warn('media blob store failed, trying bytes', e); }
+  try { await put('media', { ...rec, blob: undefined, buf: await blob.arrayBuffer() }); } catch (e) { console.warn('media bytes store failed', e); throw new Error(SAVE_FAIL); }
+}
 export async function addMedia(blob, name = 'file', extra = {}) {
   const id = uid('m_');
-  await put('media', { id, name, type: blob.type, size: blob.size, blob, added: Date.now(), ...extra });
+  await putMedia({ id, name, type: blob.type, size: blob.size, added: Date.now(), ...extra }, blob);
   return id;
 }
-export async function mediaBlob(id) { const m = await get('media', id); return m && m.blob; }
+export const recBlob = (m) => m && (m.blob || (m.buf ? new Blob([m.buf], { type: m.type || '' }) : null));
+export async function mediaBlob(id) { return recBlob(await get('media', id)); }
 export async function mediaURL(id) {
   if (urlCache.has(id)) return urlCache.get(id);
   const b = await mediaBlob(id); if (!b) return null;
@@ -40,5 +48,5 @@ export async function mediaURL(id) {
 }
 export function forgetURL(id) { const u = urlCache.get(id); if (u) { URL.revokeObjectURL(u); urlCache.delete(id); } }
 export async function replaceMedia(id, blob) {
-  const m = await get('media', id); if (!m) return; m.blob = blob; m.type = blob.type; m.size = blob.size; await put('media', m); forgetURL(id);
+  const m = await get('media', id); if (!m) return; m.type = blob.type; m.size = blob.size; await putMedia(m, blob); forgetURL(id);
 }

@@ -70,7 +70,7 @@ async function storageInfo() {
 }
 export async function exportBackup() {
   const files = {}; const meta = { app: 'ryans-reel-kit', version: 1, exported: new Date().toISOString(), projects: await db.all('projects'), photos: await db.all('photos'), styles: await db.all('styles'), media: [] };
-  for (const m of await db.all('media')) { meta.media.push({ id: m.id, name: m.name, type: m.type, role: m.role || null, added: m.added }); files['media/' + m.id] = [new Uint8Array(await m.blob.arrayBuffer()), { level: 0 }]; }
+  for (const m of await db.all('media')) { meta.media.push({ id: m.id, name: m.name, type: m.type, role: m.role || null, added: m.added }); files['media/' + m.id] = [new Uint8Array(await db.recBlob(m).arrayBuffer()), { level: 0 }]; }
   files['backup.json'] = strToU8(JSON.stringify(meta));
   const zip = zipSync(files); return new Blob([zip], { type: 'application/zip' });
 }
