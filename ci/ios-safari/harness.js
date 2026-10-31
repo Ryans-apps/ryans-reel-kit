@@ -51,6 +51,25 @@ async function imgStats(url) { const i = new Image(); i.src = url; await i.decod
     const pv = q('#preview'); const pvs = pv ? stats(pv, 108, 192) : null;
     await step('preview-frame', !!pvs && pvs.std > 4, { preview: pvs });
     await shot('02-video-imported', 500);
+
+    // Diagnostics for black previews: how must a <video> be primed on iOS before drawImage gets a frame?
+    { const db = W().__rrk.db; const id = P.clips[0].mediaId; const url = await db.mediaURL(id); const out = {};
+      const mk = (o = {}) => { const v = D().createElement('video'); v.playsInline = true; v.preload = 'auto'; if (o.cors) v.crossOrigin = 'anonymous'; if (o.muted) v.muted = v.defaultMuted = true; v.src = url + (o.frag || ''); return v; };
+      const meta = v => race(new Promise((r, j) => { if (v.readyState >= 1) r(); v.addEventListener('loadedmetadata', r, { once: true }); v.addEventListener('error', () => j(new Error('err ' + v.error?.code)), { once: true }); }), 8000);
+      const frame = v => { try { return stats(v, 36, 64); } catch (e) { return String(e); } };
+      const seekWait = (v, t) => race(new Promise(r => { v.addEventListener('seeked', r, { once: true }); v.currentTime = t; }), 4000);
+      // A: what the editor does now (videoEl): unmuted, crossOrigin, seek 0.001, wait
+      let v = mk({ cors: true }); await meta(v); await seekWait(v, 0.001); await sleep(1500); out.A_editor_seekOnly = { rs: v.readyState, frame: frame(v) };
+      // B: same + muted play/pause (what probeVideo does)
+      v = mk({ cors: true, muted: true }); await meta(v); out.B_play = await race(v.play().then(() => 'ok'), 4000); v.pause(); await seekWait(v, 1.0); await sleep(300); out.B_mutedPlayPause = { rs: v.readyState, frame: frame(v) };
+      // C: B, then unmute afterwards (would let the same element carry sound when the user presses play)
+      v.muted = false; await seekWait(v, 1.5); await sleep(300); out.C_unmutedAfterPrime = { rs: v.readyState, frame: frame(v) };
+      // D: unmuted play without a gesture (expected to be refused on iOS)
+      v = mk({ cors: true }); await meta(v); out.D_unmutedPlay = await race(v.play().then(() => 'ok'), 4000); v.pause();
+      // E: media-fragment #t=0.1 (common iOS poster trick)
+      v = mk({ frag: '#t=0.1' }); await meta(v); await sleep(2000); out.E_fragment = { rs: v.readyState, frame: frame(v) };
+      await step('diag-ios-video-frames', true, out); }
+
     // 2) mixed batch: video + photo in one pick (the case that used to hang forever)
     t1 = Date.now(); const r2 = await race(V.addMediaFiles([clip, png]), 30000);
     P = V.currentProject();
@@ -79,6 +98,7 @@ async function imgStats(url) { const i = new Image(); i.src = url; await i.decod
       const pvEl = q('#sheetBody video'); let pvInfo = null;
       if (pvEl) { await until(() => pvEl.readyState >= 2 && pvEl.currentTime > 0, 8000, 'preview frame').catch(() => {}); await sleep(400);
         pvInfo = { readyState: pvEl.readyState, currentTime: pvEl.currentTime }; try { pvInfo.frame = stats(pvEl, 72, 128); } catch (e) { pvInfo.frameErr = String(e); } }
+      if (pvEl && pvEl.readyState < 2) { const d = {}; pvEl.muted = true; d.play = await race(pvEl.play().then(() => 'ok'), 4000); pvEl.pause(); await sleep(500); d.rs = pvEl.readyState; try { d.frame = stats(pvEl, 72, 128); } catch (e) { d.frame = String(e); } await step('diag-export-preview-after-muted-play', true, d); }
       await step('export-preview-first-frame', !!pvInfo && pvInfo.readyState >= 2 && pvInfo.currentTime > 0 && (pvInfo.frame ? pvInfo.frame.mean > 8 : true), pvInfo);
       const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.src = URL.createObjectURL(res.blob);
       const meta = await Promise.race([new Promise(r => { v.onloadedmetadata = () => r({ w: v.videoWidth, h: v.videoHeight, dur: v.duration }); v.onerror = () => r({ error: v.error?.code }); }), sleep(15000).then(() => ({ error: 'timeout' }))]);
