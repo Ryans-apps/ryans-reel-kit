@@ -2,7 +2,7 @@
 import * as db from './db.js';
 import { $, $$, el, toast, fmt, clamp, slider, chips, pickFiles, openSheet, loadImage, canvas, canvasToBlob, sleep } from './util.js';
 import { drawFrame, ensureFonts, layout, projectDuration, clipAt, clipDur, clipEnd, clipsEnd, touching, settleClips, migrateClips, FILTER_NAMES, TRANSITIONS, TRANSITION_SEC } from './compositor.js';
-import { exportProject, PRESETS } from './exporter.js';
+import { exportProject, exportCodecs, PRESETS } from './exporter.js';
 import { mix, forget as forgetAudio } from './audio.js';
 import { transcribe, wordsToCaptions, retime, personMask } from './ml.js';
 import { FONTS, CAPTION_PRESETS, TEXT_PRESETS } from './styles.js';
@@ -54,6 +54,7 @@ async function videoEl(key, mediaId) {
   let v = els.get(key); if (v && v._mid === mediaId) return v;
   v = document.createElement('video'); v.playsInline = true; v.preload = 'auto'; v._mid = mediaId; v.crossOrigin = 'anonymous';
   v.src = await db.mediaURL(mediaId); els.set(key, v);
+  v.onloadedmetadata = () => { if (v.readyState < 2) v.currentTime = 0.001; }; // iOS can stop at metadata; a seek asks for a frame
   await new Promise(r => { v.onloadeddata = r; v.onerror = r; setTimeout(r, 4000); });
   return v;
 }
@@ -313,21 +314,38 @@ async function makeCaptions() {
 }
 
 // ---------- adding things ----------
-function probeVideo(url) { return new Promise((res, rej) => { const v = document.createElement('video'); v.preload = 'auto'; v.muted = true; v.playsInline = true; v.onloadeddata = () => res(v); v.onerror = () => rej(new Error('This video format cannot be played here.')); v.src = url; }); }
+// Open a video and get a drawable frame. iOS Safari often stops at metadata (readyState 1): loadeddata, canplay and error never
+// fire. So resolve on loadedmetadata, then nudge a frame out with a muted inline play()+pause() and a seek, waiting for 'seeked'.
+export const PROBE_TIMEOUT_MS = 10000;
+const wait = (ms) => new Promise(r => setTimeout(r, ms));
+async function probeVideo(url, timeout = PROBE_TIMEOUT_MS) {
+  const v = document.createElement('video'); v.preload = 'auto'; v.muted = v.defaultMuted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
+  let timer; const tooSlow = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('This video took too long to open (over 10 s), so it was skipped. Try again, or pick a shorter or different video.')), timeout); });
+  const step = (p) => Promise.race([p, tooSlow]);
+  try {
+    await step(new Promise((res, rej) => { v.onloadedmetadata = res; v.onerror = () => rej(new Error('This video format cannot be played here.')); v.src = url; }));
+    if (v.readyState < 2) await step(Promise.race([v.play().then(() => v.pause(), () => {}), wait(3000)])); // muted inline play makes iOS fetch frames
+    const seeked = new Promise(r => v.addEventListener('seeked', r, { once: true }));
+    v.currentTime = Math.min(0.2, (v.duration || 0.4) / 2); await step(seeked);
+    return v;
+  } catch (e) { v.pause(); v.removeAttribute('src'); v.load(); throw e; }
+  finally { clearTimeout(timer); v.onerror = null; }
+}
 async function thumbOf(src) { const c = canvas(48, 85); const ctx = c.getContext('2d'); const sw = src.videoWidth || src.naturalWidth, sh = src.videoHeight || src.naturalHeight; const s = Math.max(48 / sw, 85 / sh); ctx.drawImage(src, (48 - sw * s) / 2, (85 - sh * s) / 2, sw * s, sh * s); return c.toDataURL('image/jpeg', 0.6); }
 export async function addMediaFiles(files) {
   commit(); let n = 0;
   for (const f of files) {
-    const id = await db.addMedia(f, f.name); const name = f.name.replace(/\.[^.]+$/, '').slice(0, 20);
-    if (f.type.startsWith('video')) {
-      try { const v = await probeVideo(await db.mediaURL(id)); await new Promise(r => { v.currentTime = Math.min(0.2, v.duration / 2); v.onseeked = r; setTimeout(r, 1500); });
+    try { // one bad file (or storage refusing it) must not stop the rest or fail silently
+      const id = await db.addMedia(f, f.name); const name = f.name.replace(/\.[^.]+$/, '').slice(0, 20);
+      if (f.type.startsWith('video')) {
+        const v = await probeVideo(await db.mediaURL(id));
         P.clips.push({ id: db.uid('c_'), start: clipsEnd(P), mediaId: id, type: 'video', name, in: 0, out: v.duration, srcDur: v.duration, speed: 1, volume: 1, muted: false, filter: 'none', adj: {}, transition: P.clips.length ? 'fade' : 'none', fit: 'cover', thumb: await thumbOf(v) }); n++;
-      } catch (e) { toast(e.message, 4000); }
-    } else if (f.type.startsWith('image')) {
-      const img = await imageEl(id); P.clips.push({ id: db.uid('c_'), start: clipsEnd(P), mediaId: id, type: 'image', name, dur: 3, kenBurns: true, filter: 'none', adj: {}, transition: P.clips.length ? 'fade' : 'none', fit: (img.naturalWidth > img.naturalHeight ? 'contain' : 'cover'), thumb: await thumbOf(img) }); n++;
-    }
+      } else if (f.type.startsWith('image')) {
+        const img = await imageEl(id); P.clips.push({ id: db.uid('c_'), start: clipsEnd(P), mediaId: id, type: 'image', name, dur: 3, kenBurns: true, filter: 'none', adj: {}, transition: P.clips.length ? 'fade' : 'none', fit: (img.naturalWidth > img.naturalHeight ? 'contain' : 'cover'), thumb: await thumbOf(img) }); n++;
+      } else toast(`${f.name}: not a video or photo`, 4000);
+    } catch (e) { console.error('import', f.name, e); toast(`${f.name}: ${e?.message || 'could not be added. Private browsing or full storage can block saving files.'}`, 6000); }
   }
-  await prepareMedia(); changed(); toast(n + ' added'); return n;
+  await prepareMedia(); changed(); toast(n ? n + ' added' : 'Nothing added', n ? 2000 : 5000); return n;
 }
 export async function addImageOverlay(blob, extra = {}) {
   commit(); const mediaId = await db.addMedia(blob, extra.name || 'overlay.png'); const img = await imageEl(mediaId);
@@ -336,8 +354,10 @@ export async function addImageOverlay(blob, extra = {}) {
   P.overlays.push(o); selected = { type: 'overlay', id: o.id }; changed({ inspector: true }); return o;
 }
 export async function replaceOverlayImage(o, blob) { await db.replaceMedia(o.mediaId, blob); await reloadImage(o.mediaId); save(); }
-function addText(style) { commit(); const o = { id: db.uid('o_'), kind: 'text', text: 'Tap to edit', style: structuredClone(style), start: t, dur: 3, x: 0.5, y: 0.35, scale: 1, rot: 0, opacity: 1, anim: 'pop' }; P.overlays.push(o); select('overlay', o.id); draw(); save(); fontsThenDraw(); }
-function addSticker(emoji) { commit(); const o = { id: db.uid('o_'), kind: 'sticker', emoji, size: 220, start: t, dur: 2.5, x: 0.5, y: 0.3, scale: 1, rot: 0, opacity: 1, anim: 'pop' }; P.overlays.push(o); select('overlay', o.id); draw(); save(); fontsThenDraw(); }
+// New text goes in the upper third, new stickers lower down; if something already sits there at this time, step down a little.
+function freeY(x, y, dur) { for (let k = 0; k < 6 && P.overlays.some(o => Math.abs(o.x - x) < 0.05 && Math.abs(o.y - y) < 0.05 && o.start < t + dur && o.start + o.dur > t); k++) y = Math.min(0.85, y + 0.08); return y; }
+function addText(style) { commit(); const o = { id: db.uid('o_'), kind: 'text', text: 'Tap to edit', style: structuredClone(style), start: t, dur: 3, x: 0.5, y: freeY(0.5, 0.35, 3), scale: 1, rot: 0, opacity: 1, anim: 'pop' }; P.overlays.push(o); select('overlay', o.id); draw(); save(); fontsThenDraw(); }
+function addSticker(emoji) { commit(); const o = { id: db.uid('o_'), kind: 'sticker', emoji, size: 220, start: t, dur: 2.5, x: 0.5, y: freeY(0.5, 0.6, 2.5), scale: 1, rot: 0, opacity: 1, anim: 'pop' }; P.overlays.push(o); select('overlay', o.id); draw(); save(); fontsThenDraw(); }
 async function addAudio(kind, blob, name) {
   const mediaId = await db.addMedia(blob, name); const a = await audioEl('tmp', mediaId); els.delete('tmp');
   await new Promise(r => { if (a.readyState >= 1) r(); a.onloadedmetadata = r; a.onerror = r; setTimeout(r, 3000); });
@@ -393,7 +413,7 @@ const TOOLS = {
 export const MUSIC = [['forward-momentum.mp3', 'Forward Momentum'], ['sunlit-groove.mp3', 'Sunlit Groove'], ['quick-spark.mp3', 'Quick Spark'], ['mini-glow.mp3', 'Mini Glow'], ['splash-splash.mp3', 'Splash Splash']];
 export const SFX = [['click_002.ogg', 'Click'], ['pluck_001.ogg', 'Pluck'], ['bong_001.ogg', 'Bong'], ['confirmation_001.ogg', 'Ding'], ['drop_002.ogg', 'Drop'], ['glass_001.ogg', 'Glass'], ['maximize_006.ogg', 'Whoosh up'], ['switch_002.ogg', 'Switch'], ['scratch_002.ogg', 'Scratch'], ['impactBell_heavy_000.ogg', 'Bell hit'], ['impactGeneric_light_002.ogg', 'Tap'], ['impactPunch_medium_000.ogg', 'Punch'], ['footstep_concrete_001.ogg', 'Step']];
 async function addVideoOverlay(f) {
-  commit(); const mediaId = await db.addMedia(f, f.name); let v; try { v = await probeVideo(await db.mediaURL(mediaId)); } catch (e) { return toast(e.message); }
+  commit(); let mediaId, v; try { mediaId = await db.addMedia(f, f.name); v = await probeVideo(await db.mediaURL(mediaId)); } catch (e) { return toast(e?.message || db.SAVE_FAIL, 6000); }
   const o = { id: db.uid('o_'), kind: 'video', mediaId, name: f.name.replace(/\.[^.]+$/, '').slice(0, 20), start: t, dur: Math.min(v.duration, 10), in: 0, x: 0.72, y: 0.3, scale: 0.42, rot: 0, opacity: 1, anim: 'pop', border: true, volume: 1, muted: true };
   P.overlays.push(o); await prepareMedia(); select('overlay', o.id); draw(); save();
 }
@@ -411,26 +431,35 @@ async function recordVoice() {
 // ---------- export ----------
 function exportSheet() {
   stop(); if (!P.clips.length && !P.overlays.length) return toast('Add something first.');
+  const opts = {};
   openSheet((b, close) => {
     b.append(el('h2', {}, 'Export'), el('p', {}, `Length ${fmt(projectDuration(P))}. Keep the app open while it works.`),
-      el('div', { class: 'list' }, el('button', { class: 'accent', id: 'exportSocial', onclick: () => runExport('social', b, close) }, '⚡ Export 9:16 (full quality)', el('span', {}, '1080×1920 MP4')),
-        el('button', { onclick: () => runExport('fast', b, close) }, 'Quick export (smaller file)', el('span', {}, '720×1280'))), btn('Cancel', close));
+      el('div', { class: 'list' }, el('button', { class: 'accent', id: 'exportSocial', onclick: () => runExport('social', b, close, opts) }, '⚡ Export 9:16 (full quality)', el('span', {}, '1080×1920 MP4')),
+        el('button', { onclick: () => runExport('fast', b, close, opts) }, 'Quick export (smaller file)', el('span', {}, '720×1280'))), btn('Cancel', close));
+    // Firefox has no AAC encoder, so its MP4 would carry Opus sound, which iPhone Photos and some apps won't play.
+    exportCodecs().then(({ mp4, webm }) => {
+      if (!mp4 || mp4.a !== 'opus' || !b.querySelector('#exportSocial')) return;
+      const note = el('div', { class: 'warn', id: 'aacWarn' }, el('p', {}, '⚠️ This browser can\'t make AAC sound, so the MP4 would have Opus sound. That may play silent on iPhone or in some apps. For the safest file, export on iPhone Safari or Chrome.'));
+      if (webm) { const cb = el('input', { type: 'checkbox', id: 'asWebm', onchange: () => { opts.format = cb.checked ? 'webm' : null; } }); note.append(el('label', { class: 'toggle' }, cb, ' Save as WebM instead (VP9 + Opus)')); }
+      b.querySelector('.list').before(note);
+    });
   });
 }
-export async function runExport(preset, b, close) {
+export async function runExport(preset, b, close, opts = {}) {
   b.innerHTML = ''; const prog = el('progress', { class: 'progress', max: 1, value: 0 }); const msg = el('p', { class: 'hint' }, 'Starting…'); const ac = new AbortController();
   b.append(el('h2', {}, 'Exporting…'), prog, msg, btn('Cancel', () => ac.abort()));
   let lock; try { lock = await navigator.wakeLock?.request('screen'); } catch {}
   const t0 = performance.now();
   try {
-    const r = await exportProject(P, preset, (p, m) => { prog.value = p; msg.textContent = m; }, ac.signal);
+    const r = await exportProject(P, preset, (p, m) => { prog.value = p; msg.textContent = m; }, ac.signal, opts);
     const secs = ((performance.now() - t0) / 1000).toFixed(1); const name = (P.name || 'video').replace(/[^\w\- ]+/g, '').trim() + (r.codecs.fmt === 'mp4' ? '.mp4' : '.webm');
     const file = new File([r.blob], name, { type: r.blob.type }); window.__lastExport = { ...r, secs, name };
     const url = URL.createObjectURL(r.blob);
     b.innerHTML = '';
-    b.append(el('h2', {}, 'Done ✓'), el('video', { src: url, controls: true, playsinline: true, class: 'export-preview' }), el('p', { class: 'hint' }, `${(r.blob.size / 1e6).toFixed(1)} MB · ${r.codecs.v.toUpperCase()}/${r.codecs.a.toUpperCase()} ${r.codecs.fmt.toUpperCase()} · made in ${secs} s`),
+    b.append(el('h2', {}, 'Done ✓'), el('video', { src: url, controls: true, playsinline: true, preload: 'auto', class: 'export-preview', onloadedmetadata: (e) => { const v = e.target; if (!v.currentTime) v.currentTime = Math.min(0.1, v.duration / 2); } }), el('p', { class: 'hint' }, `${(r.blob.size / 1e6).toFixed(1)} MB · ${r.codecs.v.toUpperCase()}/${r.codecs.a.toUpperCase()} ${r.codecs.fmt.toUpperCase()} · made in ${secs} s`),
       el('div', { class: 'row' }, navigator.canShare?.({ files: [file] }) ? btn('Share…', () => navigator.share({ files: [file], title: P.name }).catch(() => {}), 'accent') : null, btn('Save to phone', () => hooks.saveFile(r.blob, name), 'accent'), btn('Close', close)));
-    if (r.codecs.fmt !== 'mp4') b.append(el('p', { class: 'hint' }, 'This browser could not make MP4 here, so it saved WebM. Most apps accept it, but MP4 is safer.'));
+    if (r.codecs.fmt === 'mp4' && r.codecs.a === 'opus') b.append(el('p', { class: 'hint warn' }, '⚠️ The sound in this MP4 is Opus (this browser can\'t make AAC). It may play silent on iPhone or in some apps.'));
+    if (r.codecs.fmt !== 'mp4' && !opts.format) b.append(el('p', { class: 'hint' }, 'This browser could not make MP4 here, so it saved WebM. Most apps accept it, but MP4 is safer.'));
     return r;
   } catch (e) { if (e.name === 'AbortError') { close(); toast('Export cancelled'); } else { console.error(e); msg.textContent = 'Export failed: ' + e.message; } }
   finally { lock?.release?.(); }

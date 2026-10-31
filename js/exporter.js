@@ -11,7 +11,8 @@ export const PRESETS = {
   fast: { label: 'Quick share (720×1280, 30 fps)', w: 720, h: 1280, fps: 30, vbr: 5_000_000 },
 };
 
-export async function pickCodecs(w, h, bitrate) {
+export async function pickCodecs(w, h, bitrate, { format } = {}) {
+  if (format === 'webm') return (await canEncodeVideo('vp9', { width: w, height: h, bitrate })) ? { fmt: 'webm', v: 'vp9', a: 'opus' } : null;
   if (await canEncodeVideo('avc', { width: w, height: h, bitrate })) {
     return { fmt: 'mp4', v: 'avc', a: (await canEncodeAudio('aac')) ? 'aac' : 'opus' };
   }
@@ -29,9 +30,10 @@ async function openVideo(mediaId, maxDim) {
   return { input, sink, first };
 }
 
-export async function exportProject(project, presetKey = 'social', onProgress = () => {}, signal) {
+export async function exportCodecs() { const p = PRESETS.social; return { mp4: await pickCodecs(p.w, p.h, p.vbr), webm: await pickCodecs(p.w, p.h, p.vbr, { format: 'webm' }) }; }
+export async function exportProject(project, presetKey = 'social', onProgress = () => {}, signal, opts = {}) {
   const P = PRESETS[presetKey], { w: W, h: H, fps } = P;
-  const codecs = await pickCodecs(W, H, P.vbr); if (!codecs) throw new Error('Video encoding is not available in this browser.');
+  const codecs = await pickCodecs(W, H, P.vbr, opts); if (!codecs) throw new Error('Video encoding is not available in this browser.');
   const dur = projectDuration(project); if (dur <= 0) throw new Error('Add a clip first.');
   const N = Math.max(1, Math.round(dur * fps));
   onProgress(0, 'Mixing sound…');
