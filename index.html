@@ -44,7 +44,7 @@
     <div class="transport">
       <button class="icon" id="vPlay" aria-label="Play">▶</button>
       <span id="vTime" class="time">0:00.0 / 0:00.0</span>
-      <label class="toggle"><input type="checkbox" id="safeZone"> Safe zone</label>
+      <span class="toggles"><label class="toggle"><input type="checkbox" id="safeZone"> Safe zone</label><label class="toggle"><input type="checkbox" id="snap" checked> Snap</label></span>
       <button class="icon" id="vSplit" aria-label="Split at playhead">✂</button>
       <button class="icon" id="vZoomOut" aria-label="Zoom timeline out">−</button>
       <button class="icon" id="vZoomIn" aria-label="Zoom timeline in">+</button>
@@ -52,6 +52,7 @@
     <div class="timeline-wrap">
       <div class="timeline" id="timeline" aria-label="Timeline"><div class="tl-inner" id="tlInner"></div></div>
       <div class="playhead" aria-hidden="true"></div>
+      <button class="small gaps-btn" id="vCloseGaps" hidden>⇤ Close gaps</button>
     </div>
     <div id="inspector" class="inspector" hidden></div>
     <nav class="toolbar" aria-label="Video tools">

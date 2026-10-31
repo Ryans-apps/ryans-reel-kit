@@ -11,18 +11,33 @@ export const FILTER_NAMES = { none: 'None', vivid: 'Vivid', warm: 'Warm', cool: 
 export const TRANSITIONS = { none: 'None', fade: 'Fade', slide: 'Slide', zoom: 'Zoom', wipe: 'Wipe', blur: 'Blur', flash: 'Flash' };
 
 export const clipDur = (c) => c.type === 'image' ? c.dur : (c.out - c.in) / c.speed;
-export function layout(project) { // start time of each main clip
-  let t = 0; return project.clips.map(c => { const s = t; t += clipDur(c); return { clip: c, start: s, end: t }; });
+// Main clips each have their own start time (data v2), so there can be gaps (black, with overlays on top).
+// Projects from before v2 had no start: they were back-to-back, so fill that in. Safe to call repeatedly.
+export function migrateClips(p) {
+  let t = 0, filled = false;
+  for (const c of p.clips) { if (typeof c.start !== 'number' || !isFinite(c.start)) { c.start = t; filled = true; } t = c.start + clipDur(c); }
+  p.v = 2; return filled;
+}
+export const clipEnd = (c) => c.start + clipDur(c);
+export const clipsEnd = (p) => p.clips.reduce((m, c) => Math.max(m, clipEnd(c)), 0);
+export const touching = (a, b) => !!a && !!b && Math.abs(clipEnd(a) - b.start) < 0.02; // transitions only between clips that touch
+// Keep the main row in time order with no overlaps: a clip that would overlap is pushed along to the previous clip's end.
+export function settleClips(p) {
+  migrateClips(p); p.clips.sort((a, b) => a.start - b.start);
+  let end = 0; for (const c of p.clips) { if (c.start < 0) c.start = 0; if (c.start < end - 0.001) c.start = end; c.start = Math.round(c.start * 1000) / 1000; end = clipEnd(c); }
+}
+export function layout(project) { // start/end time of each main clip
+  migrateClips(project); return project.clips.map(c => ({ clip: c, start: c.start, end: clipEnd(c) }));
 }
 export function projectDuration(p) {
-  let d = 0; for (const c of p.clips) d += clipDur(c);
+  let d = layout(p).reduce((m, x) => Math.max(m, x.end), 0);
   for (const o of p.overlays) d = Math.max(d, o.start + o.dur);
   for (const a of p.audio) if (a.kind !== 'music') d = Math.max(d, a.start + a.dur);
   return d;
 }
 export function clipAt(project, t) {
-  const L = layout(project);
-  for (let i = 0; i < L.length; i++) if (t < L[i].end || i === L.length - 1) return { ...L[i], index: i, local: t - L[i].start };
+  const L = layout(project); // null in a gap
+  for (let i = 0; i < L.length; i++) if (t >= L[i].start - 1e-6 && (t < L[i].end || (i === L.length - 1 && t <= L[i].end + 1e-6))) return { ...L[i], index: i, local: Math.max(0, t - L[i].start) };
   return null;
 }
 export function filterCSS(c) {

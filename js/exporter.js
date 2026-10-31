@@ -1,7 +1,7 @@
 // Export: draws every frame with the shared compositor and encodes with WebCodecs via Mediabunny.
 import { Input, BlobSource, ALL_FORMATS, CanvasSink, Output, Mp4OutputFormat, WebMOutputFormat, BufferTarget, CanvasSource, AudioBufferSource, canEncodeVideo, canEncodeAudio } from '../vendor/mediabunny.min.mjs';
 import { mediaBlob } from './db.js';
-import { drawFrame, ensureFonts, layout, projectDuration, clipDur } from './compositor.js';
+import { drawFrame, ensureFonts, layout, projectDuration, clipDur, touching } from './compositor.js';
 import { mix } from './audio.js';
 import { loadImage, canvas } from './util.js';
 import { mediaURL } from './db.js';
@@ -63,15 +63,14 @@ export async function exportProject(project, presetKey = 'social', onProgress = 
     for (let n = 0; n < N; n++) {
       if (signal?.aborted) throw new DOMException('Cancelled', 'AbortError');
       const t = n / fps;
-      let idx = L.findIndex(x => t < x.end); if (idx < 0) idx = L.length - 1; // -1 when the video is photos/text only
-      const seg = L[idx];
-      if (seg && idx !== curIdx) {
-        if (curIdx >= 0 && lastMain) { // freeze last frame of the previous clip for transitions
-          prev = { clip: L[curIdx].clip, drawable: snapshot(lastMain) };
-        }
+      const idx = L.findIndex(x => t >= x.start - 1e-6 && t < x.end); // -1 in a gap (black, overlays still drawn)
+      const seg = idx >= 0 ? L[idx] : null;
+      if (idx !== curIdx) {
+        // freeze the last frame of the previous clip for a transition, only if the two clips touch
+        prev = seg && curIdx >= 0 && lastMain && touching(L[curIdx].clip, seg.clip) ? { clip: L[curIdx].clip, drawable: snapshot(lastMain) } : null;
         await stopIter('main');
         curIdx = idx;
-        if (seg.clip.type === 'video') {
+        if (seg && seg.clip.type === 'video') {
           const times = []; for (let m = n; m < N && (m / fps) < seg.end; m++) times.push(seg.clip.in + (m / fps - seg.start) * seg.clip.speed);
           await startIter('main', seg.clip.mediaId, times);
         }

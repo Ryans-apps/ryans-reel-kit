@@ -5,7 +5,7 @@
 // <user>.github.io, so caches are shared too. Only ever touch caches that start with APP + '::'.
 // Bump the core version on every release. Keep PACKS in sync with PACKS_CACHE in js/main.js.
 const APP = 'ryans-reel-kit';
-const CACHE = APP + '::core-v5', PACKS = APP + '::packs-v1';
+const CACHE = APP + '::core-v6', PACKS = APP + '::packs-v1';
 // Exact names this app used before it had a prefix (never hosted, local builds only).
 const LEGACY = ['reelkit-v1', 'reelkit-v2', 'reelkit-v3', 'reelkit-v4', 'reelkit-packs-v1'];
 const CORE = ['./', 'index.html', 'app.css', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png', 'icon-maskable-512.png',

@@ -95,3 +95,11 @@ progress.progress { width:100%; height:14px; }
 [hidden] { display:none !important; }
 .screen { overflow:hidden; }
 .screen > .bar, .screen > .transport, .screen > .toolbar, .screen > .ptools { flex-shrink:0; }
+.item.sel { touch-action:none; } /* press-and-drag a selected item without scrolling the timeline */
+.item.dragging { opacity:.85; z-index:5; }
+.snapline { position:absolute; top:0; bottom:0; width:2px; background:#ffd43b; box-shadow:0 0 6px #ffd43b; pointer-events:none; z-index:6; }
+.time { white-space:nowrap; font-size:13px; }
+.toggles { display:flex; flex-direction:column; gap:2px; }
+.toggles .toggle { font-size:12px; white-space:nowrap; display:flex; align-items:center; gap:4px; }
+.toggles input { margin:0; width:18px; height:18px; }
+.gaps-btn { position:absolute; right:6px; top:2px; z-index:7; min-height:28px; height:28px; font-size:12px; border-radius:14px; background:var(--accent); color:#fff; border:0; box-shadow:0 1px 4px #0008; }
