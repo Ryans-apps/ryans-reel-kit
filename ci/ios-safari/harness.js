@@ -28,7 +28,23 @@ async function file(path, name, type) { const b = await (await fetch(path)).blob
     await shot('01-home');
     q('#newVideo').click(); await until(() => q('#video.active'), 10000, 'video screen');
     const V = W().__rrk.V; const clip = await file('/ci/media/test-clip.mp4', 'test-clip.mp4', 'video/mp4'), png = await file('/ci/media/test-photo.png', 'test-photo.png', 'image/png');
-    const n = await V.addMediaFiles([clip, png]); const P = V.currentProject();
+    const race = (pr, ms) => Promise.race([pr.then(v => ({ v }), e => ({ err: String(e && e.message || e) })), sleep(ms).then(() => ({ timeout: ms }))]);
+    // diagnostics: where does import stall?
+    const db = W().__rrk.db; const diag = {};
+    const am = await race(db.addMedia(clip, 'diag.mp4'), 15000); diag.addMediaVideo = am;
+    if (am.v) { const u = await race(db.mediaURL(am.v), 10000); diag.mediaURL = u.v ? 'ok' : u;
+      if (u.v) for (const [ev, pre] of [['loadedmetadata', 'metadata'], ['loadeddata', 'auto'], ['canplay', 'auto']]) {
+        const v = D().createElement('video'); v.preload = pre; v.muted = true; v.playsInline = true;
+        diag['probe_' + ev] = await race(new Promise((res, rej) => { v[ 'on' + ev] = () => res({ dur: v.duration, w: v.videoWidth, rs: v.readyState }); v.onerror = () => rej(new Error('media error ' + (v.error && v.error.code))); v.src = u.v; }), 10000);
+        if (diag['probe_' + ev].timeout) diag['probe_' + ev].readyState = v.readyState;
+      }
+      if (u.v) { const v2 = D().createElement('video'); v2.muted = true; v2.playsInline = true; v2.src = u.v; diag.play_no_gesture = await race(v2.play().then(() => 'played rs=' + v2.readyState), 8000); v2.pause(); }
+    }
+    diag.addMediaImage = await race(db.addMedia(png, 'diag.png'), 15000);
+    await step('import-diagnostics', true, diag);
+    let r1 = await race(V.addMediaFiles([clip, png]), 30000);
+    if (!r1.v) { await step('import-video+image', false, r1); await shot('02a-import-stalled'); r1 = await race(V.addMediaFiles([png, png]), 30000); await step('import-image-only', !!r1.v, r1); }
+    const n = r1.v; const P = V.currentProject();
     await step('import', n === 2 && P.clips.length === 2, { added: n, clips: P.clips.map(c => c.type + ':' + (c.srcDur || c.dur)) });
     await shot('02-video-imported');
     btnByText('Text').click(); await sleep(800); const tb = [...D().querySelectorAll('#sheetBody button')].find(b => b.textContent.includes('Title')); tb?.click(); await sleep(800);
