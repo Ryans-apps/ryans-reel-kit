@@ -1,62 +1,73 @@
-// Drives the real app (served from main) inside a same-origin iframe in Mobile Safari, and reports to server.py.
+// Drives the real app inside a same-origin iframe in Mobile Safari, and reports to server.py.
+// The app at /ryans-reel-kit/ is either a byte-for-byte proxy of the live GitHub Pages build or a local checkout.
 const f = document.getElementById('f'), bar = document.getElementById('bar');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const post = (path, body) => fetch(path, { method: 'POST', body }).catch(() => {});
-const errors = [];
-async function step(name, ok, detail) { bar.textContent = (ok ? '✓ ' : '✗ ') + name + ' ' + (detail ? JSON.stringify(detail).slice(0, 120) : ''); await post('/ci/log', JSON.stringify({ step: name, ok, detail })); }
-const shot = async (name) => { await sleep(1200); await post('/ci/shot?name=' + name); };
+const errors = [], consoleLog = [], toasts = []; const T0 = Date.now(); const ts = () => ((Date.now() - T0) / 1000).toFixed(1);
+async function step(name, ok, detail) { bar.textContent = (ok ? '✓ ' : '✗ ') + name + ' ' + (detail ? JSON.stringify(detail).slice(0, 120) : ''); await post('/ci/log', JSON.stringify({ t: ts(), step: name, ok, detail })); }
+const shot = async (name, wait = 1200) => { await sleep(wait); await post('/ci/shot?name=' + name); };
 const W = () => f.contentWindow, D = () => f.contentWindow.document;
 async function until(fn, ms, label) { const t0 = Date.now(); while (Date.now() - t0 < ms) { try { const v = await fn(); if (v) return v; } catch {} await sleep(250); } throw new Error('timeout: ' + label); }
+const fmt = a => a.map(x => x?.stack || x?.message || (typeof x === 'object' ? (() => { try { return JSON.stringify(x); } catch { return String(x); } })() : String(x))).join(' ');
 function hook() { const w = W(); if (w.__ciHooked) return; w.__ciHooked = true;
-  w.addEventListener('error', e => errors.push('error: ' + (e.message || e.target?.src || e.type)), true);
-  w.addEventListener('unhandledrejection', e => errors.push('rejection: ' + (e.reason?.message || e.reason)));
-  for (const k of ['error', 'warn']) { const o = w.console[k].bind(w.console); w.console[k] = (...a) => { errors.push(k + ': ' + a.map(x => x?.message || String(x)).join(' ')); o(...a); }; } }
+  w.addEventListener('error', e => { const m = 'error: ' + (e.message || e.target?.src || e.type); errors.push(m); consoleLog.push(ts() + ' ' + m); }, true);
+  w.addEventListener('unhandledrejection', e => { const m = 'rejection: ' + (e.reason?.message || e.reason); errors.push(m); consoleLog.push(ts() + ' ' + m); });
+  for (const k of ['log', 'info', 'warn', 'error', 'debug']) { const o = w.console[k].bind(w.console); w.console[k] = (...a) => { const m = k + ': ' + fmt(a); consoleLog.push(ts() + ' ' + m); if (k === 'error' || k === 'warn') errors.push(m); o(...a); }; }
+  const t = w.document.getElementById('toast'); if (t) new w.MutationObserver(() => { if (t.textContent && toasts[toasts.length - 1] !== t.textContent) { toasts.push(t.textContent); consoleLog.push(ts() + ' toast: ' + t.textContent); } }).observe(t, { childList: true, characterData: true, subtree: true }); }
 async function ready(ms = 60000) { await until(() => { hook(); return D().body?.dataset.ready === '1' && W().__rrk; }, ms, 'app ready'); }
 const q = s => D().querySelector(s);
 const btnByText = (t) => [...D().querySelectorAll('button')].find(b => b.textContent.includes(t));
 async function file(path, name, type) { const b = await (await fetch(path)).blob(); return new File([b], name, { type }); }
+const race = (pr, ms) => Promise.race([Promise.resolve(pr).then(v => ({ v }), e => ({ err: String(e && e.message || e) })), sleep(ms).then(() => ({ timeout: ms }))]);
+// pixel stats of an image/canvas/video: mean luma and std dev (std > ~4 means a real picture, not a flat/black box)
+function stats(src, w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d'); x.drawImage(src, 0, 0, w, h); const d = x.getImageData(0, 0, w, h).data; let s = 0, s2 = 0, n = 0; for (let i = 0; i < d.length; i += 4) { const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]; s += l; s2 += l * l; n++; } const m = s / n; return { mean: +m.toFixed(1), std: +Math.sqrt(Math.max(0, s2 / n - m * m)).toFixed(1) }; }
+async function imgStats(url) { const i = new Image(); i.src = url; await i.decode(); return { w: i.naturalWidth, h: i.naturalHeight, ...stats(i, i.naturalWidth, i.naturalHeight) }; }
 (async () => {
   try {
     await step('ua', true, { ua: navigator.userAgent, VideoEncoder: 'VideoEncoder' in self, AudioEncoder: 'AudioEncoder' in self, VideoDecoder: 'VideoDecoder' in self });
+    const swText = await (await fetch('/ryans-reel-kit/sw.js')).text(); const core = (swText.match(/core-v\d+/) || [])[0];
+    await step('build', core === 'core-v7', { swCore: core });
     f.src = '/ryans-reel-kit/';
     await ready(); await step('load', true, { title: D().title, home: !!q('#home.active') });
     const reg = await Promise.race([W().navigator.serviceWorker.ready, sleep(30000).then(() => null)]);
     await sleep(3000); await ready(); // the app may reload itself once when the worker takes over
     await until(() => W().navigator.serviceWorker.controller, 20000, 'sw controller').catch(() => {});
-    const keys = await W().caches.keys(); let core = 0; for (const k of keys) if (k.includes('core')) core = (await (await W().caches.open(k)).keys()).length;
-    await step('service-worker', !!(reg && W().navigator.serviceWorker.controller), { registered: !!reg, controlled: !!W().navigator.serviceWorker.controller, caches: keys, coreFiles: core, isolated: W().crossOriginIsolated });
+    const keys = await W().caches.keys(); let coreN = 0; for (const k of keys) if (k.includes('core')) coreN = (await (await W().caches.open(k)).keys()).length;
+    await step('service-worker', !!(reg && W().navigator.serviceWorker.controller) && keys.some(k => k.includes('core-v7')), { registered: !!reg, controlled: !!W().navigator.serviceWorker.controller, caches: keys, coreFiles: coreN });
     await shot('01-home');
     q('#newVideo').click(); await until(() => q('#video.active'), 10000, 'video screen');
-    const V = W().__rrk.V; const clip = await file('/ci/media/test-clip.mp4', 'test-clip.mp4', 'video/mp4'), png = await file('/ci/media/test-photo.png', 'test-photo.png', 'image/png');
-    const race = (pr, ms) => Promise.race([pr.then(v => ({ v }), e => ({ err: String(e && e.message || e) })), sleep(ms).then(() => ({ timeout: ms }))]);
-    // diagnostics: where does import stall?
-    const db = W().__rrk.db; const diag = {};
-    const am = await race(db.addMedia(clip, 'diag.mp4'), 15000); diag.addMediaVideo = am;
-    if (am.v) { const u = await race(db.mediaURL(am.v), 10000); diag.mediaURL = u.v ? 'ok' : u;
-      if (u.v) for (const [ev, pre] of [['loadedmetadata', 'metadata'], ['loadeddata', 'auto'], ['canplay', 'auto']]) {
-        const v = D().createElement('video'); v.preload = pre; v.muted = true; v.playsInline = true;
-        diag['probe_' + ev] = await race(new Promise((res, rej) => { v[ 'on' + ev] = () => res({ dur: v.duration, w: v.videoWidth, rs: v.readyState }); v.onerror = () => rej(new Error('media error ' + (v.error && v.error.code))); v.src = u.v; }), 10000);
-        if (diag['probe_' + ev].timeout) diag['probe_' + ev].readyState = v.readyState;
-      }
-      if (u.v) { const v2 = D().createElement('video'); v2.muted = true; v2.playsInline = true; v2.src = u.v; diag.play_no_gesture = await race(v2.play().then(() => 'played rs=' + v2.readyState), 8000); v2.pause(); }
-    }
-    diag.addMediaImage = await race(db.addMedia(png, 'diag.png'), 15000);
-    await step('import-diagnostics', true, diag);
-    let r1 = await race(V.addMediaFiles([clip, png]), 30000);
-    if (!r1.v) { await step('import-video+image', false, r1); await shot('02a-import-stalled'); r1 = await race(V.addMediaFiles([png, png]), 30000); await step('import-image-only', !!r1.v, r1); }
-    const n = r1.v; const P = V.currentProject();
-    await step('import', n === 2 && P.clips.length === 2, { added: n, clips: P.clips.map(c => c.type + ':' + (c.srcDur || c.dur)) });
-    await shot('02-video-imported');
+    await shot('01b-empty-editor', 600);
+    const V = W().__rrk.V;
+    const clip = await file('/ci/media/test-clip.mp4', 'test-clip.mp4', 'video/mp4'), png = await file('/ci/media/test-photo.png', 'test-photo.png', 'image/png');
+    // 1) the exact call a real file pick makes (pickFiles -> addMediaFiles), video only
+    let t1 = Date.now(); const r1 = await race(V.addMediaFiles([clip]), 30000); const ms1 = Date.now() - t1;
+    let P = V.currentProject(); const c0 = P.clips[0];
+    await step('import-video-no-hang', !!r1.v || r1.v === 0, { result: r1, ms: ms1, toasts: toasts.slice(-3) });
+    await step('import-video-clip', r1.v === 1 && c0?.type === 'video' && Math.abs((c0.srcDur || 0) - 3) < 0.3, { added: r1.v, clips: P.clips.map(c => ({ type: c.type, srcDur: c.srcDur, name: c.name })) });
+    let th = null; try { th = c0?.thumb ? await imgStats(c0.thumb) : null; } catch (e) { th = { error: String(e) }; }
+    const tlItem = q('#timeline .item.k-clip'); const tlBg = tlItem ? getComputedStyle(tlItem).backgroundImage : null;
+    await step('import-video-thumbnail', !!th && th.std > 4 && !!tlItem && /url\(/.test(tlBg || ''), { thumb: th, timelineItem: !!tlItem, timelineBg: (tlBg || '').slice(0, 40) });
+    V._test.seek(1.0); V.draw(); await sleep(1500); V.draw(); await sleep(300);
+    const pv = q('#preview'); const pvs = pv ? stats(pv, 108, 192) : null;
+    await step('preview-frame', !!pvs && pvs.std > 4, { preview: pvs });
+    await shot('02-video-imported', 500);
+    // 2) mixed batch: video + photo in one pick (the case that used to hang forever)
+    t1 = Date.now(); const r2 = await race(V.addMediaFiles([clip, png]), 30000);
+    P = V.currentProject();
+    await step('import-video+photo-batch', r2.v === 2 && P.clips.length === 3, { result: r2, ms: Date.now() - t1, clips: P.clips.map(c => c.type + ':' + (c.srcDur || c.dur)) });
+    await shot('02b-batch-imported');
     btnByText('Text').click(); await sleep(800); const tb = [...D().querySelectorAll('#sheetBody button')].find(b => b.textContent.includes('Title')); tb?.click(); await sleep(800);
     V._test.addSticker('🔥'); V._test.seek(1.5); V.draw(); await sleep(500);
     V._test.select('clip', P.clips[0].id); V._test.split(); await sleep(800);
-    const P2 = V.currentProject();
-    await step('edit', P2.overlays.length >= 2 && P2.clips.length === 3, { overlays: P2.overlays.map(o => o.kind), clips: P2.clips.length });
+    const P2 = V.currentProject(); const tx = P2.overlays.find(o => o.kind === 'text'), st = P2.overlays.find(o => o.kind === 'sticker');
+    await step('edit', P2.overlays.length >= 2 && P2.clips.length === 4, { overlays: P2.overlays.map(o => o.kind + '@' + o.y.toFixed(2)), clips: P2.clips.length, textStickerApart: !!(tx && st && Math.abs(tx.y - st.y) > 0.05) });
     await shot('03-edited');
-    q('#vExport').click(); await sleep(800); btnByText('Quick export').click();
+    q('#vExport').click(); await sleep(800);
+    await step('export-sheet', true, { aacWarningShown: !!q('#aacWarn'), text: (q('#sheetBody')?.textContent || '').slice(0, 200) });
+    btnByText('Quick export').click();
     const t0 = Date.now();
     const res = await until(() => W().__lastExport || (D().querySelector('#sheetBody')?.textContent.includes('Export failed') && 'failed'), 300000, 'export');
-    await shot('04-export');
+    await shot('04-export', 2000);
     if (res === 'failed') await step('export', false, { msg: q('#sheetBody').textContent.slice(0, 300) });
     else {
       await step('export', res.blob.size > 10000, { codecs: res.codecs, size: res.blob.size, frames: res.frames, secs: res.secs, ms: Date.now() - t0 });
@@ -65,9 +76,14 @@ async function file(path, name, type) { const b = await (await fetch(path)).blob
         const d = ab.getChannelData(0); let s = 0; for (let i = 0; i < d.length; i++) s += d[i] * d[i];
         await step('export-audio', Math.sqrt(s / d.length) > 0.005, { duration: ab.duration, channels: ab.numberOfChannels, rms: Math.sqrt(s / d.length) });
       } catch (e) { await step('export-audio', false, { error: String(e) }); }
+      const pvEl = q('#sheetBody video'); let pvInfo = null;
+      if (pvEl) { await until(() => pvEl.readyState >= 2 && pvEl.currentTime > 0, 8000, 'preview frame').catch(() => {}); await sleep(400);
+        pvInfo = { readyState: pvEl.readyState, currentTime: pvEl.currentTime }; try { pvInfo.frame = stats(pvEl, 72, 128); } catch (e) { pvInfo.frameErr = String(e); } }
+      await step('export-preview-first-frame', !!pvInfo && pvInfo.readyState >= 2 && pvInfo.currentTime > 0 && (pvInfo.frame ? pvInfo.frame.mean > 8 : true), pvInfo);
       const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.src = URL.createObjectURL(res.blob);
       const meta = await Promise.race([new Promise(r => { v.onloadedmetadata = () => r({ w: v.videoWidth, h: v.videoHeight, dur: v.duration }); v.onerror = () => r({ error: v.error?.code }); }), sleep(15000).then(() => ({ error: 'timeout' }))]);
       await step('export-plays', !meta.error && meta.w > 0, meta);
+      await step('export-audio-codec-note', res.codecs.a !== 'opus' || /Opus/.test(q('#sheetBody')?.textContent || ''), { audio: res.codecs.a, opusNoteShown: /sound in this MP4 is Opus/.test(q('#sheetBody')?.textContent || '') });
     }
     const close = btnByText('Close') || btnByText('Cancel'); close?.click(); await sleep(500);
     await W().__rrk.goHome(); await sleep(500);
@@ -87,6 +103,8 @@ async function file(path, name, type) { const b = await (await fetch(path)).blob
     q('#draftList li button.small')?.click(); await sleep(3000); await shot('07-offline-open-draft');
     await post('/ci/offline?on=0');
   } catch (e) { await step('harness-error', false, { error: String(e && e.stack || e) }); await shot('99-error'); }
-  await step('console', errors.length === 0, { errors: errors.slice(0, 40) });
+  const benign = /interactive-widget/;
+  await step('console', errors.filter(e => !benign.test(e)).length === 0, { errors: errors.slice(0, 40) });
+  await post('/ci/upload?name=console.json', JSON.stringify({ console: consoleLog, toasts }, null, 1));
   await post('/ci/done');
 })();
